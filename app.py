@@ -37,14 +37,20 @@ def extract_action_items(meeting_text):
         names = [ent.text for ent in sentence.ents if ent.label_ == "PERSON"]
 
         # Parse for dates and deadlines
-        dates = search_dates(sentence.text)
+        dates = search_dates(sentence.text, settings={'PREFER_DATES_FROM': 'future'})
         deadline = dates[0][1].strftime("%Y-%m-%d") if dates else "No specific deadline"
 
-        # If we found verbs, assume it's an action item
-        if verbs:
+        # Extract departments and other responsible groups
+        departments = [ent.text for ent in sentence.ents if ent.label_ == "ORG"]
+        responsible_party = ", ".join(names + departments) if names or departments else "Unassigned"
+        
+        # Action-related verbs for filtering sentences
+        action_related_verbs = {"finalize", "produce", "create", "manage", "prepare", "review", "develop", "monitor", "organize", "approve"}
+        
+        # If we found action-related verbs, assume it's an action item
+        if verbs and any(verb in action_related_verbs for verb in verbs):
             action_text = sentence.text.strip()
-            responsible_person = ", ".join(names) if names else "Unassigned"
-            item = f"- **{action_text}** - **Assigned to: {responsible_person}** - **Deadline: {deadline}**"
+            item = f"- **{action_text}** - **Assigned to: {responsible_party}** - **Deadline: {deadline}**"
             action_items.append(item)
 
     return action_items
