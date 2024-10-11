@@ -147,6 +147,67 @@ def generate_quiz_with_fireworks(summary_text):
     else:
         return "Unable to generate a question at this time."
 
+def get_topic_and_resources_with_llm(summary_text):
+    headers = {
+        "Authorization": f"Bearer {fireworks_api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "accounts/fireworks/models/firefunction-v2",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    f"Based on the following lecture content, identify the main topic "
+                    f"and provide a list of relevant educational resources such as articles, "
+                    f"videos, or books to help a student learn more about it. "
+                    f"Please follow this exact format:\n\n"
+                    f"Main Topic: [Topic Name]\n"
+                    f"Resources:\n"
+                    f"1) [Resource Title] - [Description]\n"
+                    f"2) [Resource Title] - [Description]\n\n"
+                    f"Lecture Content:\n{summary_text}"
+                )
+            }
+        ]
+    }
+    
+    response = requests.post(fireworks_model_endpoint, json=data, headers=headers)
+    if response.status_code == 200:
+        result = response.json()
+        response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+#        print("Fireworks API response:", response_text)  # Debugging output to inspect response
+
+        # Extract the main topic and resources
+        lines = response_text.splitlines()
+        topic = ""
+        resources = []
+
+        # Process each line to detect topic and resource items
+        for line in lines:
+            line = line.strip()
+            if line.startswith("Main Topic:"):
+                # Extract topic text after "Main Topic:"
+                topic = line.replace("Main Topic:", "").strip()
+            elif line.startswith(("1)", "2)", "3)", "4)", "5)")):
+                # Append the resource text after the numeric label
+                resource_text = line.split(")", 1)[-1].strip()
+                if resource_text:
+                    resources.append(resource_text)
+
+        # Ensure topic and resources have valid content
+        if not topic:
+            topic = "Unknown Topic"
+        if not resources:
+            resources = ["No resources found for this topic."]
+            
+        return topic, resources
+    else:
+        print("Error with Fireworks API:", response.status_code, response.text)
+        return None, None
+
+
 # Function to get Zoom bot token
 def get_zoom_bot_token():
     client_id = os.getenv("ZOOM_CLIENT_ID")
@@ -187,6 +248,16 @@ def handle_zoom_webhook(payload):
         answer_given = command_text.split("/answer")[-1].strip().upper()
         correct_answer = current_correct_answer[-1].upper()
         response_text = "Correct answer!" if answer_given == correct_answer else "Incorrect answer. Try again."
+    elif "/additional resources" in command_text:
+        # Generate a lecture summary to use for topic and resource extraction
+        summary = generate_summary_with_llamaindex("lecture summary")
+        topic, resources = get_topic_and_resources_with_llm(summary)
+        
+        # Format the response text for Zoom bot
+        if resources:
+            response_text = f"**Main Topic:** {topic}\n\n**Additional Resources:**\n" + "\n".join([f"{i+1}. {res}" for i, res in enumerate(resources)])
+        else:
+            response_text = "Sorry, no additional resources found for this topic."
     else:
         response_text = call_groq_api(command_text, to_jid)
 
