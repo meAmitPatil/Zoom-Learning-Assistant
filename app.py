@@ -1,19 +1,33 @@
 import os
 import base64
 import requests
+import spacy
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, VectorParams
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
+from chatgroq_handler import call_groq_api
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.indices.vector_store.base import VectorStoreIndex
+from llama_index.core import Document
+from llama_index.core.settings import Settings
+
+# Disable OpenAI LLM globally
+Settings.llm = None
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app, Qdrant client, and Sentence Transformer model
+# Initialize Flask app, spaCy model, Qdrant client, and Sentence Transformer model
 app = Flask(__name__)
+nlp = spacy.load("en_core_web_sm")
 model = SentenceTransformer('all-MiniLM-L6-v2')
 qdrant_client = QdrantClient(host="localhost", port=6333)
+
+# Initialize Hugging Face embedding model
+huggingface_embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
 # Fireworks AI configuration
 fireworks_api_key = os.getenv("FIREWORKS_API_KEY")
@@ -22,20 +36,72 @@ fireworks_model_endpoint = "https://api.fireworks.ai/inference/v1/chat/completio
 # Initialize summarization pipeline
 summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
-# Store user quiz answers
+# Store user quiz answers and correct answers in a list
 user_quiz_answers = {}
+current_correct_answer = []
 
 # Function to generate embeddings
 def embed_text(text):
     return model.encode(text)
 
-# Function to query Qdrant for meeting content
-def query_qdrant(query_text):
-    with open("transcripts/transcript_intro_to_ml.txt", "r") as file:
-        meeting_text = file.read()
-    return meeting_text
+# Function to store lecture transcript in Qdrant and LlamaIndex
+def store_transcript(file_path):
+    try:
+        with open(file_path, "r") as file:
+            transcript_text = file.read()
 
-# Function to generate a summary from the lecture transcript
+        # Split transcript for both Qdrant and LlamaIndex
+        max_chunk_size = 512
+        transcript_chunks = [transcript_text[i:i + max_chunk_size] for i in range(0, len(transcript_text), max_chunk_size)]
+        embeddings = [embed_text(chunk) for chunk in transcript_chunks]
+
+        # Store in Qdrant
+        if qdrant_client.collection_exists(collection_name="lecture_transcripts"):
+            qdrant_client.delete_collection(collection_name="lecture_transcripts")
+
+        qdrant_client.create_collection(
+            collection_name="lecture_transcripts",
+            vectors_config=VectorParams(size=len(embeddings[0]), distance="Cosine")
+        )
+
+        points = [PointStruct(id=i, vector=embedding, payload={"text": chunk}) for i, (chunk, embedding) in enumerate(zip(transcript_chunks, embeddings))]
+        qdrant_client.upsert(collection_name="lecture_transcripts", points=points)
+        print("Transcript stored in Qdrant successfully.")
+        
+        # Store in LlamaIndex using from_documents
+        documents = [Document(text=chunk) for chunk in transcript_chunks]
+        global llama_index
+        llama_index = VectorStoreIndex.from_documents(documents, embed_model=huggingface_embed_model)
+        print("Transcript stored in LlamaIndex successfully.")
+    except Exception as e:
+        print("An error occurred while storing transcript:", e)
+
+# Function to query Qdrant for relevant lecture chunks
+def query_qdrant_for_summary(query_text):
+    query_vector = embed_text(query_text)
+    search_result = qdrant_client.search(
+        collection_name="lecture_transcripts",
+        query_vector=query_vector,
+        limit=5
+    )
+    combined_text = " ".join([hit.payload["text"] for hit in search_result])
+    return combined_text
+
+# Function to query LlamaIndex for relevant content
+def query_llamaindex_for_summary(query_text):
+    query_engine = llama_index.as_query_engine(llm=None)
+    response = query_engine.query(query_text)
+    
+    # Assuming response contains the result text directly
+    combined_text = response.response  # Adjust based on actual attribute
+    return combined_text
+
+# Function to generate a summary using both Qdrant and LlamaIndex
+def generate_summary_with_llamaindex(query_text):
+    relevant_text = query_llamaindex_for_summary(query_text)
+    return generate_summary(relevant_text)
+
+# Function to generate a summary for a given text
 def generate_summary(text):
     max_chunk = 512
     text_chunks = [text[i:i + max_chunk] for i in range(0, len(text), max_chunk)]
@@ -55,7 +121,7 @@ def generate_quiz_with_fireworks(summary_text):
     }
     
     data = {
-        "model": "accounts/fireworks/models/llama-v3p1-405b-instruct",  # Ensure this is the correct model path
+        "model": "accounts/fireworks/models/llama-v3p1-405b-instruct",
         "messages": [
             {
                 "role": "user",
@@ -69,16 +135,17 @@ def generate_quiz_with_fireworks(summary_text):
         result = response.json()
         question_text = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         
-        # Parse the response to extract the question and the correct answer
-        correct_answer = None
         if "Correct answer:" in question_text:
-            question_text, correct_answer = question_text.split("**Correct answer:**")[0], question_text.split("**Correct answer:**")[-1].strip()
-            correct_answer = correct_answer.split(")")[0][-1]  # Extract only the letter (A, B, C, etc.)
-
-        return question_text.strip(), correct_answer
+            question, correct_answer = question_text.split("Correct answer:")
+            question = question.strip()
+            correct_answer = correct_answer.strip().split(")")[0]
+            current_correct_answer.clear()
+            current_correct_answer.append(correct_answer)
+            return question
+        else:
+            return "Unable to generate a question at this time."
     else:
-        print("Error calling Fireworks API:", response.status_code, response.text)
-        return "Unable to generate a question at this time.", None
+        return "Unable to generate a question at this time."
 
 # Function to get Zoom bot token
 def get_zoom_bot_token():
@@ -91,86 +158,66 @@ def get_zoom_bot_token():
     }
     
     response = requests.post(token_url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get("access_token")
-    else:
-        print("Error getting Zoom bot token:", response.json())
-        return None
+    return response.json().get("access_token") if response.status_code == 200 else None
 
 # Handle Zoom webhook commands
 def handle_zoom_webhook(payload):
     zoom_bot_jid = os.getenv("ZOOM_BOT_JID")
     auth_token = get_zoom_bot_token()
+    
+    payload_data = payload.get("payload", {})
+    command_text = payload_data.get("cmd", "").lower()
+    to_jid = payload_data.get("toJid")
+    account_id = payload_data.get("accountId")
 
-    command_text = payload.get("payload", {}).get("cmd")
-    if not command_text:
-        print("No 'cmd' key found in the payload.")
-        return
+    if not to_jid or not account_id:
+        print("Error: 'toJid' or 'accountId' is missing in the payload")
+        return "Error: Missing required fields in the payload"
 
-    # Check for the /summarize command
-    if "/summarize lecture" in command_text.lower():
-        transcript = query_qdrant("today's lecture")
-        summary = generate_summary(transcript)
+    response_text = "Command not recognized. Try '/summarize lecture' or '/start quiz'."
+
+    if "/summarize lecture" in command_text:
+        summary = generate_summary_with_llamaindex("lecture summary")
         response_text = f"Lecture Summary:\n{summary}"
-
-    # Check for the /start quiz command
-    elif "/start quiz" in command_text.lower():
-        transcript = query_qdrant("today's lecture")
-        summary = generate_summary(transcript)
-        question_text, correct_answer = generate_quiz_with_fireworks(summary)
-        
-        # Store the correct answer dynamically for validation in the user's session or memory
-        global current_correct_answer
-        current_correct_answer = correct_answer
-        
+    elif "/start quiz" in command_text:
+        summary = generate_summary_with_llamaindex("lecture summary")
+        question_text = generate_quiz_with_fireworks(summary)
         response_text = f"Quiz Question:\n{question_text}"
-
-    # Check for answer submission command by users
-    elif "answer" in command_text.lower():
-        # Extract the answer from the command
-        answer_given = command_text.lower().split("answer")[-1].strip()
-        
-        # Validate the user's answer with the stored correct answer
-        if answer_given.lower() == current_correct_answer.lower():
-            response_text = "Correct answer!"
-        else:
-            response_text = "Incorrect answer. Try again."
-
+    elif "/answer" in command_text:
+        answer_given = command_text.split("/answer")[-1].strip().upper()
+        correct_answer = current_correct_answer[-1].upper()
+        response_text = "Correct answer!" if answer_given == correct_answer else "Incorrect answer. Try again."
     else:
-        response_text = "Command not recognized. Try '/summarize lecture' or '/start quiz'."
+        response_text = call_groq_api(command_text, to_jid)
 
-    # Send response to Zoom
+    # Prepare message payload for Zoom
     message_payload = {
         "robot_jid": zoom_bot_jid,
-        "to_jid": payload["payload"]["toJid"],
-        "user_jid": payload["payload"]["toJid"],
-        "account_id": payload["payload"]["accountId"],
+        "to_jid": to_jid,
+        "user_jid": to_jid,
+        "account_id": account_id,
         "content": {
             "head": {"text": "Meeting Insights - Response"},
             "body": [{"type": "message", "text": response_text}]
         }
     }
-
+    
     headers = {
         "Authorization": f"Bearer {auth_token}",
         "Content-Type": "application/json"
     }
 
+    # Send the message to Zoom
     zoom_url = "https://api.zoom.us/v2/im/chat/messages"
-    resp = requests.post(zoom_url, headers=headers, json=message_payload)
+    response = requests.post(zoom_url, headers=headers, json=message_payload)
+    print("Message sent successfully to Zoom:", response.json() if response.status_code == 201 else response.json())
 
-    if resp.status_code != 201:
-        print("Error sending message to Zoom:", resp.json())
-    else:
-        print("Message sent successfully to Zoom:", resp.json())
-
-# Flask route to handle Zoom webhook POST requests
 @app.route('/webhook', methods=['POST'])
 def zoom_webhook():
     payload = request.json
     handle_zoom_webhook(payload)
     return jsonify({"status": "Processed"}), 200
 
-# Run the Flask app
 if __name__ == '__main__':
+    store_transcript("transcripts/transcript_intro_to_ml.txt")
     app.run(host='0.0.0.0', port=int(os.getenv("PORT", 4000)))
