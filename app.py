@@ -13,6 +13,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.indices.vector_store.base import VectorStoreIndex
 from llama_index.core import Document
 from llama_index.core.settings import Settings
+from google_drive_upload import save_notes_to_drive
 
 # Disable OpenAI LLM globally
 Settings.llm = None
@@ -147,6 +148,45 @@ def generate_quiz_with_fireworks(summary_text):
             return "Unable to generate a question at this time."
     else:
         return "Unable to generate a question at this time."
+    
+def generate_notes_with_fireworks(transcript_file):
+    # Read the transcript file
+    try:
+        with open(transcript_file, "r") as file:
+            transcript_text = file.read()
+    except FileNotFoundError:
+        print(f"Error: The file {transcript_file} was not found.")
+        return None
+
+    # Prepare the data payload
+    data = {
+        "model": "accounts/fireworks/models/llama-v3p1-405b-instruct",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "Create detailed lecture notes based on the following transcript. "
+                    "Include important points, key concepts, and any relevant details that will help with studying:\n\n" +
+                    transcript_text
+                )
+            }
+        ]
+    }
+
+    headers = {
+        "Authorization": f"Bearer {fireworks_api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Send the request to Fireworks AI
+    try:
+        response = requests.post(fireworks_model_endpoint, json=data, headers=headers)
+        response.raise_for_status()
+        notes_content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        return notes_content
+    except requests.exceptions.RequestException as e:
+        print(f"Error generating notes with Fireworks AI: {e}")
+        return None
 
 def get_topic_and_resources_with_llm(summary_text):
     headers = {
@@ -272,6 +312,15 @@ def handle_zoom_webhook(payload):
                 response_text = "Please enter a valid rating between 1 and 5."
         except ValueError:
             response_text = "Invalid rating. Please respond with a number between 1 and 5."
+    elif "/generate notes" in command_text:
+        # Generate notes from the transcript file
+        transcript_file = "transcripts/transcript_intro_to_ml.txt"
+        notes = generate_notes_with_fireworks(transcript_file)
+        if notes:
+            save_notes_to_drive(notes, filename="Lecture_Notes.txt", folder_id = "1lcClr2x2N2v8iQcSPEXrlgVnXGB6Ym7d")
+            response_text = "Notes generated successfully, sent to Zoom chat, and saved to Google Drive."
+        else:
+            response_text = "Failed to generate notes from the transcript."
     else:
         response_text = call_groq_api(command_text, to_jid)
 
