@@ -39,6 +39,7 @@ summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 # Store user quiz answers and correct answers in a list
 user_quiz_answers = {}
 current_correct_answer = []
+poll_rating = {}
 
 # Function to generate embeddings
 def embed_text(text):
@@ -258,6 +259,19 @@ def handle_zoom_webhook(payload):
             response_text = f"**Main Topic:** {topic}\n\n**Additional Resources:**\n" + "\n".join([f"{i+1}. {res}" for i, res in enumerate(resources)])
         else:
             response_text = "Sorry, no additional resources found for this topic."
+    elif "/poll" in command_text:
+        response_text = "On a scale of 1-5, how well did you understand the lecture? Please respond with '/rate <number>'."
+    elif command_text.startswith("/rate"):
+        try:
+            # Extract rating from the command
+            rating = int(command_text.split("/rate")[-1].strip())
+            if 1 <= rating <= 5:
+                poll_rating[to_jid] = rating  # Store rating with user's JID
+                response_text = f"Thank you! You rated the lecture with a {rating} out of 5."
+            else:
+                response_text = "Please enter a valid rating between 1 and 5."
+        except ValueError:
+            response_text = "Invalid rating. Please respond with a number between 1 and 5."
     else:
         response_text = call_groq_api(command_text, to_jid)
 
