@@ -2,7 +2,6 @@ import os
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 def send_chat_to_zoom(message, payload):
@@ -27,7 +26,6 @@ def send_chat_to_zoom(message, payload):
             }
         }
 
-        # Send the request
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         print("Successfully sent chat to Zoom.")

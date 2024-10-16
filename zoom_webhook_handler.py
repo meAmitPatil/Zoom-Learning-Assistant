@@ -4,7 +4,6 @@ import base64
 from flask import jsonify
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 def handle_zoom_webhook(response, payload):
@@ -18,17 +17,14 @@ def handle_zoom_webhook(response, payload):
     zoom_bot_jid = os.getenv("ZOOM_BOT_JID")
     auth_token = get_zoom_bot_token()
 
-    # Check if the Zoom bot token was retrieved successfully
     if not auth_token:
         print("Error: Could not retrieve Zoom bot token.")
         return
 
-    # Check if zoom_bot_jid is set in the environment
     if not zoom_bot_jid:
         print("Error: ZOOM_BOT_JID environment variable not found.")
         return
 
-    # Construct the message payload
     message_payload = {
         "robot_jid": zoom_bot_jid,
         "to_jid": payload.get("toJid"),
@@ -37,7 +33,7 @@ def handle_zoom_webhook(response, payload):
         "content": {
             "head": {"text": "Meeting Insights"},
             "body": [
-                {"type": "message", "text": response}  # Inject the Qdrant response here
+                {"type": "message", "text": response}
             ]
         }
     }
@@ -65,7 +61,6 @@ def get_zoom_bot_token():
     zoom_client_id = os.getenv("ZOOM_CLIENT_ID")
     zoom_client_secret = os.getenv("ZOOM_CLIENT_SECRET")
 
-    # Validate environment variables
     if not zoom_client_id or not zoom_client_secret:
         print("Error: Missing ZOOM_CLIENT_ID or ZOOM_CLIENT_SECRET environment variables.")
         return None

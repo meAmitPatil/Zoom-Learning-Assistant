@@ -3,7 +3,6 @@ import base64
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 def get_zoom_bot_token():
@@ -13,14 +12,12 @@ def get_zoom_bot_token():
     client_id = os.getenv("ZOOM_CLIENT_ID")
     client_secret = os.getenv("ZOOM_CLIENT_SECRET")
     
-    # Check if client_id and client_secret are present
     if not client_id or not client_secret:
         print("Error: Missing Zoom client ID or client secret in environment variables.")
         return None
 
     token_url = "https://zoom.us/oauth/token?grant_type=client_credentials"
     
-    # Prepare the authorization header
     auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     headers = {
         "Authorization": f"Basic {auth_header}"
